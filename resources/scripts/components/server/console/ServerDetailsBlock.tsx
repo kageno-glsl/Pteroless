@@ -17,7 +17,7 @@ import useWebsocketEvent from '@/plugins/useWebsocketEvent';
 import classNames from 'classnames';
 import { capitalize } from '@/lib/strings';
 
-type Stats = Record<'memory' | 'cpu' | 'disk' | 'uptime' | 'rx' | 'tx', number>;
+type Stats = Record<'memory' | 'cpu' | 'disk' | 'uptime' | 'rx' | 'tx', number> & { networkAvailable: boolean };
 
 const getBackgroundColor = (value: number, max: number | null): string | undefined => {
     const delta = !max ? 0 : value / max;
@@ -40,7 +40,15 @@ const Limit = ({ limit, children }: { limit: string | null; children: React.Reac
 );
 
 const ServerDetailsBlock = ({ className }: { className?: string }) => {
-    const [stats, setStats] = useState<Stats>({ memory: 0, cpu: 0, disk: 0, uptime: 0, tx: 0, rx: 0 });
+    const [stats, setStats] = useState<Stats>({
+        memory: 0,
+        cpu: 0,
+        disk: 0,
+        uptime: 0,
+        tx: 0,
+        rx: 0,
+        networkAvailable: true,
+    });
 
     const status = ServerContext.useStoreState((state) => state.status.value);
     const connected = ServerContext.useStoreState((state) => state.socket.connected);
@@ -85,6 +93,7 @@ const ServerDetailsBlock = ({ className }: { className?: string }) => {
             tx: stats.network.tx_bytes,
             rx: stats.network.rx_bytes,
             uptime: stats.uptime || 0,
+            networkAvailable: stats.network_available !== false,
         });
     });
 
@@ -128,10 +137,22 @@ const ServerDetailsBlock = ({ className }: { className?: string }) => {
                 <Limit limit={textLimits.disk}>{bytesToString(stats.disk)}</Limit>
             </StatBlock>
             <StatBlock icon={faCloudDownloadAlt} title={'Network (Inbound)'}>
-                {status === 'offline' ? <span className={'text-gray-400'}>Offline</span> : bytesToString(stats.rx)}
+                {status === 'offline' ? (
+                    <span className={'text-gray-400'}>Offline</span>
+                ) : stats.networkAvailable ? (
+                    bytesToString(stats.rx)
+                ) : (
+                    <span className={'text-gray-400'}>N/A (local)</span>
+                )}
             </StatBlock>
             <StatBlock icon={faCloudUploadAlt} title={'Network (Outbound)'}>
-                {status === 'offline' ? <span className={'text-gray-400'}>Offline</span> : bytesToString(stats.tx)}
+                {status === 'offline' ? (
+                    <span className={'text-gray-400'}>Offline</span>
+                ) : stats.networkAvailable ? (
+                    bytesToString(stats.tx)
+                ) : (
+                    <span className={'text-gray-400'}>N/A (local)</span>
+                )}
             </StatBlock>
         </div>
     );

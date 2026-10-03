@@ -24,6 +24,7 @@ return [
 'memory_bytes' => Arr::get($data, 'utilization.memory_bytes', 0),
 'cpu_absolute' => Arr::get($data, 'utilization.cpu_absolute', 0),
 'disk_bytes' => Arr::get($data, 'utilization.disk_bytes', 0),
+'network_available' => Arr::get($data, 'utilization.network_available', true),
 'network_rx_bytes' => Arr::get($data, 'utilization.network.rx_bytes', 0),
 'network_tx_bytes' => Arr::get($data, 'utilization.network.tx_bytes', 0),
 'uptime' => Arr::get($data, 'utilization.uptime', 0),

@@ -31,6 +31,7 @@ class LocalSocket {
             memory_bytes: resources.memory_bytes ?? 0,
             cpu_absolute: resources.cpu_absolute ?? 0,
             disk_bytes: resources.disk_bytes ?? 0,
+            network_available: resources.network_available ?? true,
             network: {
                 rx_bytes: resources.network_rx_bytes ?? 0,
                 tx_bytes: resources.network_tx_bytes ?? 0,
@@ -79,10 +80,10 @@ class LocalSocket {
                 this.emit(SocketEvent.CONSOLE_OUTPUT, next);
             }
             this.lastLog = next;
-            return 5000;
+            return 1500;
         } catch (error) {
             console.error(error);
-            return 5000;
+            return 1500;
         }
     }
 

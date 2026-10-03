@@ -35,7 +35,10 @@ export default forwardRef<HTMLFormElement, Props>(({ title, ...props }, ref) => 
         <Form {...props} ref={ref}>
             <div css={tw`md:flex w-full bg-white shadow-lg rounded-lg p-6 md:pl-0 mx-1`}>
                 <div css={tw`flex-none select-none mb-6 md:mb-0 self-center`}>
-                    <div css={tw`text-3xl text-center font-semibold text-neutral-800`}>Pteroless</div>
+                    <div css={tw`flex items-center justify-center gap-2 text-3xl text-center font-semibold text-neutral-800`}>
+                        <img src={'/favicons/android-chrome-192x192.png'} alt={''} css={tw`w-12 h-12`} />
+                        <span>Pteroless</span>
+                    </div>
                 </div>
                 <div css={tw`flex-1`}>{props.children}</div>
             </div>

@@ -27,17 +27,168 @@ return 0;
 return $pid;
 }
 
-private function alive(int $pid): bool
+private function processGroups(Server $server): array
 {
-return function_exists('posix_kill') ? @posix_kill($pid, 0) : is_dir('/proc/' . $pid);
+$root = realpath($this->local->path($server));
+$startup = trim($server->startup);
+if ($root === false || $startup === '') return [];
+
+$commands = preg_split('/\s*(?:&&|\|\||;)\s*/', $startup) ?: [];
+$groups = [];
+foreach (glob('/proc/[0-9]*/cwd') ?: [] as $cwd) {
+if (@readlink($cwd) !== $root) continue;
+
+$pid = (int) basename(dirname($cwd));
+$cmdline = str_replace("\0", ' ', (string) @file_get_contents('/proc/' . $pid . '/cmdline'));
+if ($cmdline === '') continue;
+
+$matches = str_contains($cmdline, $startup);
+foreach ($commands as $command) {
+$command = trim(preg_replace('/^(?:(?:else|exec)\s+)+/', '', trim($command)) ?? $command);
+if ($command !== '' && str_contains($cmdline, $command)) {
+$matches = true;
+break;
+}
+}
+if (!$matches) continue;
+
+$stat = @file_get_contents('/proc/' . $pid . '/stat');
+$close = $stat === false ? false : strrpos($stat, ')');
+if ($close === false) continue;
+$fields = preg_split('/\s+/', trim(substr($stat, $close + 1)));
+if (($fields[0] ?? '') === 'Z') continue;
+
+$group = (int) ($fields[2] ?? 0);
+if ($group > 0) $groups[$group][] = $pid;
 }
 
-public function isRunning(Server $server): bool { return $this->pid($server) > 0; }
+return $groups;
+}
+
+private function processStat(int $pid): ?array
+{
+$stat = @file_get_contents('/proc/' . $pid . '/stat');
+$close = $stat === false ? false : strrpos($stat, ')');
+if ($close === false) return null;
+$fields = preg_split('/\s+/', trim(substr($stat, $close + 1)));
+if (count($fields) < 20) return null;
+
+return [
+'state' => $fields[0],
+'group' => (int) $fields[2],
+'user_ticks' => (int) $fields[11],
+'system_ticks' => (int) $fields[12],
+'start_ticks' => (int) $fields[19],
+];
+}
+
+private function cpuUsage(Server $server, array $samples): float
+{
+$file = @fopen($this->local->metaPath($server) . '/cpu-sample.json', 'c+');
+if ($file === false) return 0.0;
+
+try {
+if (!flock($file, LOCK_EX)) return 0.0;
+rewind($file);
+$previous = json_decode((string) stream_get_contents($file), true);
+if (!is_array($previous)) $previous = [];
+
+$now = microtime(true);
+$elapsed = $now - (float) ($previous['sampled_at'] ?? 0);
+$cpu = (float) ($previous['cpu'] ?? 0);
+if ($previous === [] || $elapsed >= 0.5 || $samples === []) {
+$deltaTicks = 0;
+if ($elapsed >= 0.5) {
+foreach ($samples as $processId => $sample) {
+$old = $previous['processes'][$processId] ?? null;
+if (is_array($old) && (int) ($old['start_ticks'] ?? -1) === $sample['start_ticks']) {
+$deltaTicks += max(0, $sample['ticks'] - (int) $old['ticks']);
+}
+}
+$ticksPerSecond = max(1, (int) shell_exec('getconf CLK_TCK 2>/dev/null'));
+$cpu = round(($deltaTicks / $ticksPerSecond) / $elapsed * 100, 2);
+} elseif ($samples === []) {
+$cpu = 0.0;
+}
+
+ftruncate($file, 0);
+rewind($file);
+fwrite($file, json_encode([
+'sampled_at' => $now,
+'cpu' => $cpu,
+'processes' => $samples,
+]));
+}
+
+return $cpu;
+} finally {
+flock($file, LOCK_UN);
+fclose($file);
+}
+}
+
+private function alive(int $pid): bool
+{
+if (function_exists('posix_kill')) {
+return @posix_kill($pid, 0) || @posix_kill(-$pid, 0);
+}
+
+if (is_dir('/proc/' . $pid)) return true;
+foreach (glob('/proc/[0-9]*/stat') ?: [] as $statFile) {
+$stat = @file_get_contents($statFile);
+$close = $stat === false ? false : strrpos($stat, ')');
+if ($close === false) continue;
+$fields = preg_split('/\s+/', trim(substr($stat, $close + 1)));
+if ((int) ($fields[2] ?? 0) === $pid && ($fields[0] ?? '') !== 'Z') return true;
+}
+return false;
+}
+
+private function signalGroup(int $group, int $signal): void
+{
+if (function_exists('posix_kill')) {
+@posix_kill(-$group, $signal);
+return;
+}
+
+$name = $signal === SIGKILL ? 'KILL' : 'TERM';
+@exec('/bin/kill -' . $name . ' -- -' . $group . ' 2>/dev/null');
+}
+
+private function clockTicks(): int
+{
+$ticks = (int) shell_exec('getconf CLK_TCK 2>/dev/null');
+return $ticks > 0 ? $ticks : 100;
+}
+
+public function isRunning(Server $server): bool
+{
+return $this->pid($server) > 0 || $this->processGroups($server) !== [];
+}
 
 public function start(Server $server): int
 {
 $this->local->ensureDirectory($server);
-if ($this->isRunning($server)) return $this->pid($server);
+$lock = @fopen($this->local->metaPath($server) . '/start.lock', 'c');
+if ($lock === false) throw new RuntimeException('Unable to acquire the process start lock.');
+try {
+if (!flock($lock, LOCK_EX)) throw new RuntimeException('Unable to acquire the process start lock.');
+return $this->startLocked($server);
+} finally {
+flock($lock, LOCK_UN);
+fclose($lock);
+}
+}
+
+private function startLocked(Server $server): int
+{
+$this->local->ensureDirectory($server);
+if ($this->isRunning($server)) {
+$pid = $this->pid($server);
+if ($pid > 0) return $pid;
+$groups = $this->processGroups($server);
+return $groups === [] ? 0 : (int) array_key_first($groups);
+}
 
 $command = trim($server->startup);
 if ($command === '') throw new RuntimeException('Startup command is empty.');
@@ -98,11 +249,20 @@ return $pid;
 public function stop(Server $server, bool $force = false): void
 {
 $pid = $this->pid($server);
-if ($pid < 1) return;
-$signal = $force ? 'KILL' : 'TERM';
-@exec('kill -' . $signal . ' -- -' . $pid . ' 2>/dev/null');
+$groups = $this->processGroups($server);
+if ($pid > 0) $groups[$pid] = $pid;
+if ($groups === []) return;
+$signal = $force ? SIGKILL : SIGTERM;
+foreach (array_keys($groups) as $group) {
+$this->signalGroup((int) $group, $signal);
+}
 usleep(300000);
-if (!$force && $this->alive($pid)) @exec('kill -KILL -- -' . $pid . ' 2>/dev/null');
+if (!$force) {
+foreach (array_keys($this->processGroups($server)) as $group) {
+$this->signalGroup((int) $group, SIGKILL);
+}
+if ($pid > 0 && $this->alive($pid)) $this->signalGroup($pid, SIGKILL);
+}
 @unlink($this->pidFile($server));
 @unlink($this->fifo($server));
 }
@@ -142,45 +302,75 @@ return $data === false ? '' : $data;
 public function stats(Server $server): array
 {
 $pid = $this->pid($server);
-$running = $pid > 0;
+$groups = $this->processGroups($server);
+$processIds = $pid > 0 ? [$pid] : [];
+foreach ($groups as $members) $processIds = array_merge($processIds, $members);
+$processIds = array_values(array_unique($processIds));
+$pidStat = $pid > 0 ? $this->processStat($pid) : null;
+$running = $groups !== [] || ($pidStat !== null && $pidStat['state'] !== 'Z');
 $memory = 0;
-$cpu = 0.0;
 $uptime = 0;
-if ($running && is_file("/proc/{$pid}/status")) {
-$status = file_get_contents("/proc/{$pid}/status") ?: '';
-if (preg_match('/^VmRSS:\s+(\d+)\s+kB/m', $status, $m)) $memory = (int) $m[1] * 1024;
-if (preg_match('/^State:\s+(\w)/m', $status, $m) && $m[1] === 'Z') $running = false;
+$samples = [];
+foreach ($processIds as $processId) {
+$stat = $this->processStat((int) $processId);
+if ($stat === null || $stat['state'] === 'Z') continue;
+
+$status = @file_get_contents('/proc/' . $processId . '/status') ?: '';
+if (preg_match('/^VmRSS:\s+(\d+)\s+kB/m', $status, $m)) $memory += (int) $m[1] * 1024;
+$samples[$processId] = [
+'ticks' => $stat['user_ticks'] + $stat['system_ticks'],
+'start_ticks' => $stat['start_ticks'],
+];
 }
-if ($running && is_file("/proc/{$pid}/stat")) {
-$stat = file_get_contents("/proc/{$pid}/stat") ?: '';
-$parts = preg_split('/\s+/', trim($stat));
-if (isset($parts[21], $parts[13], $parts[14])) {
-$hz = (int) shell_exec('getconf CLK_TCK 2>/dev/null') ?: 100;
-$start = (int) $parts[21] / $hz;
-$now = microtime(true);
+
+$cpu = $running ? $this->cpuUsage($server, $samples) : 0.0;
+$uptimePid = $pid > 0 && isset($samples[$pid]) ? $pid : 0;
+if ($uptimePid < 1) {
+foreach ($groups as $group => $members) {
+if (isset($samples[$group])) {
+$uptimePid = (int) $group;
+break;
+}
+foreach ($members as $member) {
+if (isset($samples[$member])) {
+$uptimePid = $member;
+break 2;
+}
+}
+}
+}
+if ($uptimePid > 0) {
 $boot = (float) @file_get_contents('/proc/uptime');
-$elapsed = max(0.001, $boot - $start);
-$cpu = (((int)$parts[13] + (int)$parts[14]) / $hz) / $elapsed * 100;
-$uptime = (int) ($elapsed * 1000);
+if ($boot > 0) $uptime = (int) max(0, $boot - ($samples[$uptimePid]['start_ticks'] / $this->clockTicks())) * 1000;
 }
-}
+
 return [
 'state' => $running ? 'running' : 'offline',
 'is_suspended' => false,
 'utilization' => [
 'memory_bytes' => $memory,
-'cpu_absolute' => round($cpu, 2),
-'disk_bytes' => $this->diskUsage($this->local->path($server)),
-'network' => ['rx_bytes' => 0, 'tx_bytes' => 0],
+'cpu_absolute' => $cpu,
+'disk_bytes' => $this->diskUsage($server),
+'network_available' => false,
+'network' => ['rx_bytes' => null, 'tx_bytes' => null],
 'uptime' => $uptime,
 ],
 ];
 }
 
-private function diskUsage(string $path): int
+private function diskUsage(Server $server): int
 {
+$cacheFile = $this->local->metaPath($server) . '/disk-usage.json';
+$cached = json_decode((string) @file_get_contents($cacheFile), true);
+if (is_array($cached) && (int) ($cached['updated_at'] ?? 0) > time() - 30) {
+return (int) ($cached['bytes'] ?? 0);
+}
+
+$path = $this->local->path($server);
 $out = [];
 exec('du -sb ' . escapeshellarg($path) . ' 2>/dev/null', $out);
-return isset($out[0]) && preg_match('/^(\d+)/', $out[0], $m) ? (int) $m[1] : 0;
+$bytes = isset($out[0]) && preg_match('/^(\d+)/', $out[0], $m) ? (int) $m[1] : 0;
+@file_put_contents($cacheFile, json_encode(['bytes' => $bytes, 'updated_at' => time()]), LOCK_EX);
+return $bytes;
 }
 }

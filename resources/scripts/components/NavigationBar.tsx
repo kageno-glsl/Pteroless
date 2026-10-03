@@ -56,7 +56,10 @@ export default () => {
                             'text-2xl font-header font-medium px-4 no-underline text-neutral-200 hover:text-neutral-100 transition-colors duration-150'
                         }
                     >
-                        {name}
+                        <span className={'flex items-center gap-2'}>
+                            <img src={'/favicons/android-chrome-192x192.png'} alt={''} className={'w-8 h-8'} />
+                            {name}
+                        </span>
                     </Link>
                 </div>
                 <RightNavigation className={'flex h-full items-center justify-center'}>
