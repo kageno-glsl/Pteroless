@@ -146,60 +146,83 @@ golang-go \
 sqlite3
 ok "System dependencies installed."
 step "Checking PHP"
-for version in 8.4 8.3 8.2; do
-if apt-cache show "php${version}-cli" >/dev/null 2>&1; then
-if command -v php >/dev/null 2>&1; then
-CURRENT_PHP="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)"
-if [[ "$CURRENT_PHP" == "$version" ]]; then
-PHPV="$version"
+# Use distribution-provided PHP meta-packages instead of hard-coding
+# php8.x-* package names. This also handles environments that ship a
+# separate/custom PHP build under /usr/local/php.
+PHP_PACKAGES=(
+php
+php-cli
+php-fpm
+php-sqlite3
+php-mysql
+php-mbstring
+php-xml
+php-curl
+php-zip
+php-bcmath
+php-gd
+php-intl
+php-opcache
+)
+
+info "Installing/refreshing the Debian/Ubuntu PHP package set."
+apt-get install -y "${PHP_PACKAGES[@]}"
+
+# Some dev containers put a custom PHP before /usr/bin in PATH. Prefer the
+# package-managed PHP because its extensions are installed by apt and match
+# the system ABI.
+SYSTEM_PHP=""
+if [[ -x "/usr/bin/php" ]]; then
+SYSTEM_PHP="/usr/bin/php"
+else
+for candidate in /usr/bin/php8.4 /usr/bin/php8.3 /usr/bin/php8.2; do
+if [[ -x "$candidate" ]]; then
+SYSTEM_PHP="$candidate"
 break
 fi
-fi
-fi
-done
-if [[ -z "$PHPV" ]]; then
-if command -v php >/dev/null 2>&1; then
-CURRENT_MAJOR="$(php -r 'echo PHP_MAJOR_VERSION;' 2>/dev/null || echo 0)"
-CURRENT_MINOR="$(php -r 'echo PHP_MINOR_VERSION;' 2>/dev/null || echo 0)"
-if [[ "$CURRENT_MAJOR" -eq 8 ]] &&
- [[ "$CURRENT_MINOR" -ge 2 ]] &&
- [[ "$CURRENT_MINOR" -lt 5 ]]; then
-PHPV="${CURRENT_MAJOR}.${CURRENT_MINOR}"
-fi
-fi
-fi
-if [[ -z "$PHPV" ]]; then
-for version in 8.4 8.3 8.2; do
-if apt-cache show "php${version}-cli" >/dev/null 2>&1; then
-PHPV="$version"
-break
-fi
 done
 fi
-if [[ -z "$PHPV" ]]; then
-fail "Could not find PHP 8.2, 8.3 or 8.4 in the configured repositories."
+
+if [[ -n "$SYSTEM_PHP" ]]; then
+PHP_VERSION="$("$SYSTEM_PHP" -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)"
+if [[ "$PHP_VERSION" =~ ^8\.[2-9]$ ]]; then
+# Ensure commands such as composer (which use /usr/bin/env php) also resolve
+# to the system PHP instead of /usr/local/php.
+export PATH="/usr/bin:/bin:${PATH}"
+hash -r 2>/dev/null || true
+ok "Using system PHP ${PHP_VERSION} (${SYSTEM_PHP})"
+else
+fail "The system PHP at ${SYSTEM_PHP} is unsupported: ${PHP_VERSION:-unknown}. Requires PHP 8.2+."
 fi
-info "Using PHP ${PHPV}"
-step "Installing PHP ${PHPV}"
-apt-get install -y \
-"php${PHPV}-cli" \
-"php${PHPV}-fpm" \
-"php${PHPV}-sqlite3" \
-"php${PHPV}-mysql" \
-"php${PHPV}-mbstring" \
-"php${PHPV}-xml" \
-"php${PHPV}-curl" \
-"php${PHPV}-zip" \
-"php${PHPV}-bcmath" \
-"php${PHPV}-gd" \
-"php${PHPV}-intl" \
-"php${PHPV}-opcache"
-ok "PHP ${PHPV} installed."
-if ! command -v php >/dev/null 2>&1; then
-fail "PHP installation failed."
+else
+fail "Could not locate a package-managed PHP binary in /usr/bin."
 fi
-PHP_VERSION="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
-ok "PHP version: ${PHP_VERSION}"
+
+# Install all required extensions for the same package-managed PHP.
+step "Installing PHP extensions"
+apt-get install -y "${PHP_PACKAGES[@]}"
+
+# Verify the exact extensions Composer will check.
+REQUIRED_EXTENSIONS=(zip pdo_mysql sodium bcmath mbstring xml curl gd intl)
+MISSING_EXTENSIONS=()
+for ext in "${REQUIRED_EXTENSIONS[@]}"; do
+if ! php -m 2>/dev/null | grep -Eiq "^${ext}$"; then
+MISSING_EXTENSIONS+=("$ext")
+fi
+done
+
+# OPcache is reported by `php -m` as "Zend OPcache", not "opcache".
+if ! php -m 2>/dev/null | grep -Eiq "^Zend OPcache$"; then
+MISSING_EXTENSIONS+=("opcache")
+fi
+
+if [[ "${#MISSING_EXTENSIONS[@]}" -gt 0 ]]; then
+fail "PHP ${PHP_VERSION} is missing extensions: ${MISSING_EXTENSIONS[*]}"
+fi
+
+PHP_VERSION="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)"
+PHPV="$PHP_VERSION"
+ok "PHP ${PHPV} and required extensions are ready."
 step "Checking Composer"
 if ! command -v composer >/dev/null 2>&1; then
 info "Installing Composer."
@@ -264,16 +287,75 @@ fi
 ok "$(go version)"
 step "Preparing SQLite"
 mkdir -p "$ROOT/database"
-touch "$ROOT/database/database.sqlite"
-chmod 664 "$ROOT/database/database.sqlite"
-ok "SQLite database ready."
+DB_FILE="$ROOT/database/database.sqlite"
+USE_EXISTING_DB=false
+
+# If the installer has been run before and a database already exists, let
+# normal interactive installs choose whether to keep it or start fresh.
+if [[ -f "$DB_FILE" ]]; then
+if [[ "$AUTOMATIC_SETUP" == true ]]; then
+info "Automatic setup enabled: replacing the existing database with a fresh one."
+rm -f "$DB_FILE"
+else
+printf "\n"
+warn "An existing SQLite database was found:"
+printf "  %s\n" "$DB_FILE"
+printf "\n"
+read -r -p "Use existing database? [Y/n]: " USE_DB_CONFIRM
+USE_DB_CONFIRM="${USE_DB_CONFIRM:-Y}"
+
+if [[ "$USE_DB_CONFIRM" =~ ^[Yy]$ ]]; then
+USE_EXISTING_DB=true
+ok "Using existing database."
+else
+info "Replacing existing database with a fresh one."
+rm -f "$DB_FILE"
+fi
+fi
+fi
+
+if [[ "$USE_EXISTING_DB" != true ]]; then
+touch "$DB_FILE"
+chmod 664 "$DB_FILE"
+ok "Fresh SQLite database ready."
+else
+chmod 664 "$DB_FILE"
+fi
 step "Configuring environment"
 if [[ ! -f "$ROOT/.env" ]]; then
-if [[ ! -f "$ROOT/.env.example" ]]; then
-fail ".env.example was not found."
-fi
+if [[ -f "$ROOT/.env.example" ]]; then
 cp "$ROOT/.env.example" "$ROOT/.env"
-ok ".env created."
+ok ".env created from .env.example."
+else
+info ".env.example not found. Creating a default .env file."
+cat > "$ROOT/.env" <<EOF
+APP_NAME=Pteroless
+APP_ENV=production
+APP_KEY=
+APP_DEBUG=false
+APP_URL=${APP_URL}
+
+LOG_CHANNEL=stack
+LOG_LEVEL=warning
+
+DB_CONNECTION=sqlite
+DB_DATABASE=${DB_FILE}
+
+BROADCAST_CONNECTION=log
+CACHE_STORE=file
+FILESYSTEM_DISK=local
+QUEUE_CONNECTION=sync
+SESSION_DRIVER=file
+SESSION_LIFETIME=120
+
+MAIL_MAILER=log
+
+# Pteroless / application defaults
+APP_ENVIRONMENT_ONLY=false
+CACHE_DRIVER=file
+EOF
+ok ".env created with default settings."
+fi
 else
 info ".env already exists. Keeping existing file."
 fi
@@ -291,7 +373,7 @@ set_env "APP_DEBUG" "false"
 set_env "APP_ENVIRONMENT_ONLY" "false"
 set_env "APP_URL" "$APP_URL"
 set_env "DB_CONNECTION" "sqlite"
-set_env "DB_DATABASE" "$ROOT/database/database.sqlite"
+set_env "DB_DATABASE" "$DB_FILE"
 set_env "CACHE_DRIVER" "file"
 set_env "CACHE_STORE" "file"
 set_env "SESSION_DRIVER" "file"
@@ -306,12 +388,34 @@ set_env "MAIL_MAILER" "log"
 fi
 ok "Environment configured."
 step "Generating application key"
-if grep -qE '^APP_KEY=.+$' "$ROOT/.env"; then
+# Laravel's Composer scripts can invoke Artisan before vendor dependencies
+# finish installing, so APP_KEY must exist before `composer install`.
+CURRENT_APP_KEY="$(grep -E '^APP_KEY=' "$ROOT/.env" | head -n1 | cut -d'=' -f2- || true)"
+if [[ -n "$CURRENT_APP_KEY" && "$CURRENT_APP_KEY" != "null" ]]; then
 ok "Application key already exists."
 else
-php artisan key:generate --force
+APP_KEY_VALUE="$(php -r 'echo "base64:".base64_encode(random_bytes(32));')"
+if [[ -z "$APP_KEY_VALUE" ]]; then
+fail "Could not generate an application encryption key."
+fi
+set_env "APP_KEY" "$APP_KEY_VALUE"
 ok "Application key generated."
 fi
+
+step "Preparing Laravel storage"
+# Laravel may boot during Composer post-install scripts. The compiled view
+# path and framework cache directories must already exist at that point.
+mkdir -p \
+"$ROOT/storage/framework/cache/data" \
+"$ROOT/storage/framework/sessions" \
+"$ROOT/storage/framework/views" \
+"$ROOT/storage/logs" \
+"$ROOT/bootstrap/cache"
+chmod -R 775 \
+"$ROOT/storage" \
+"$ROOT/bootstrap/cache"
+ok "Laravel storage directories prepared."
+
 step "Installing PHP dependencies"
 composer install \
 --no-dev \
@@ -319,6 +423,7 @@ composer install \
 --no-interaction \
 --prefer-dist
 ok "PHP dependencies installed."
+
 step "Preparing Laravel"
 php artisan config:clear
 php artisan cache:clear || true
@@ -330,12 +435,43 @@ php artisan migrate \
 --no-interaction
 ok "Database migrations completed."
 step "Checking administrator account"
+if [[ "$USE_EXISTING_DB" == true ]]; then
 ADMIN_EXISTS="0"
-ADMIN_EXISTS="$(php artisan tinker --execute='
-echo \App\Models\User::where("root_admin", true)->count();
-' 2>/dev/null || echo 0)"
+
+if sqlite3 "$DB_FILE" "SELECT name FROM sqlite_master WHERE type='table' AND name='users';" | grep -qx "users"; then
+ADMIN_EXISTS="$(sqlite3 "$DB_FILE" \
+"SELECT COUNT(*) FROM users WHERE CAST(root_admin AS TEXT) IN ('1','true');" \
+2>/dev/null || echo 0)"
+fi
+
 if [[ "$ADMIN_EXISTS" =~ ^[0-9]+$ ]] && [[ "$ADMIN_EXISTS" -gt 0 ]]; then
-ok "Administrator already exists. Skipping account creation."
+ok "An administrator already exists in the existing database. Skipping account creation."
+else
+EMAIL_SQL="$(printf '%s' "$ADMIN_EMAIL" | sed "s/'/''/g")"
+USERNAME_SQL="$(printf '%s' "$ADMIN_USERNAME" | sed "s/'/''/g")"
+
+EMAIL_TAKEN="$(sqlite3 "$DB_FILE" \
+"SELECT COUNT(*) FROM users WHERE email = '${EMAIL_SQL}';" 2>/dev/null || echo 0)"
+USERNAME_TAKEN="$(sqlite3 "$DB_FILE" \
+"SELECT COUNT(*) FROM users WHERE username = '${USERNAME_SQL}';" 2>/dev/null || echo 0)"
+
+if [[ "$EMAIL_TAKEN" =~ ^[0-9]+$ ]] && [[ "$EMAIL_TAKEN" -gt 0 ]] ||
+   [[ "$USERNAME_TAKEN" =~ ^[0-9]+$ ]] && [[ "$USERNAME_TAKEN" -gt 0 ]]; then
+warn "Requested administrator username/email is already in use in the existing database."
+info "Skipping administrator creation to avoid changing the existing user."
+else
+info "Creating administrator account."
+php artisan p:user:make \
+--email="$ADMIN_EMAIL" \
+--username="$ADMIN_USERNAME" \
+--password="$ADMIN_PASSWORD" \
+--name-first="$ADMIN_FIRST_NAME" \
+--name-last="$ADMIN_LAST_NAME" \
+--admin=1 \
+--no-interaction
+ok "Administrator account created."
+fi
+fi
 else
 info "Creating administrator account."
 php artisan p:user:make \
@@ -349,6 +485,17 @@ php artisan p:user:make \
 ok "Administrator account created."
 fi
 step "Installing frontend dependencies"
+# Some Pteroless/Pterodactyl source revisions import Signals but omit the
+# dependency from package.json/yarn.lock. Add the compatible upstream package
+# before a frozen Yarn install when it is missing.
+if [[ -f "$ROOT/package.json" ]]; then
+if ! node -e 'const p=require("./package.json"); const d={...(p.dependencies||{}), ...(p.devDependencies||{})}; process.exit(d["@preact/signals-react"] ? 0 : 1);' 2>/dev/null; then
+info "Missing @preact/signals-react dependency. Adding compatible version."
+yarn add "@preact/signals-react@^1.2.1" --ignore-scripts --non-interactive
+ok "@preact/signals-react dependency added."
+fi
+fi
+
 if [[ -f "$ROOT/yarn.lock" ]]; then
 if ! command -v yarn >/dev/null 2>&1; then
 info "Yarn not found. Installing Yarn."
@@ -368,6 +515,10 @@ fi
 ok "Frontend dependencies installed with npm."
 fi
 step "Building frontend"
+# The project's `yarn clean` script expects public/assets to exist.
+# Fresh checkouts may not contain this generated directory yet.
+mkdir -p "$ROOT/public/assets"
+ok "Frontend asset directory ready."
 if [[ -f "$ROOT/yarn.lock" ]]; then
 yarn run build:production
 else
@@ -383,29 +534,46 @@ step "Setting permissions"
 mkdir -p \
 "$ROOT/storage" \
 "$ROOT/storage/framework" \
+"$ROOT/storage/framework/cache/data" \
+"$ROOT/storage/framework/sessions" \
+"$ROOT/storage/framework/views" \
 "$ROOT/storage/logs" \
 "$ROOT/storage/app" \
 "$ROOT/storage/app/servers" \
 "$ROOT/bootstrap/cache"
-chown -R www-data:www-data \
+
+# The installer itself runs as root via sudo, but `start.sh` is intended to
+# run as the normal Codespaces/dev user. Give that user ownership so Laravel
+# can write logs, cache, sessions, compiled views, and SQLite data.
+INSTALL_USER="${SUDO_USER:-${USER:-}}"
+if [[ -z "$INSTALL_USER" || "$INSTALL_USER" == "root" ]]; then
+INSTALL_USER="$(logname 2>/dev/null || true)"
+fi
+
+if [[ -z "$INSTALL_USER" || "$INSTALL_USER" == "root" ]]; then
+warn "Could not determine the non-root installer user. Leaving ownership unchanged."
+else
+INSTALL_GROUP="$(id -gn "$INSTALL_USER" 2>/dev/null || echo "$INSTALL_USER")"
+
+chown -R "${INSTALL_USER}:${INSTALL_GROUP}" \
 "$ROOT/storage" \
 "$ROOT/bootstrap/cache"
-chown www-data:www-data \
-"$ROOT/database/database.sqlite"
-chmod -R 775 \
+chown "${INSTALL_USER}:${INSTALL_GROUP}" "$DB_FILE" 2>/dev/null || true
+chown "${INSTALL_USER}:${INSTALL_GROUP}" "$ROOT/.env" 2>/dev/null || true
+
+chmod -R u+rwX,g+rwX \
 "$ROOT/storage" \
 "$ROOT/bootstrap/cache"
-chmod 664 \
-"$ROOT/database/database.sqlite"
-chown www-data:www-data "$ROOT/.env"
+chmod 664 "$DB_FILE"
 chmod 640 "$ROOT/.env"
-ok "Permissions configured."
+ok "Writable permissions configured for ${INSTALL_USER}."
+fi
 step "Writing installation information"
 cat > "$ROOT/.Pteroless-installed" <<EOF
 Pteroless installation completed.
 APP_URL=${APP_URL}
 DB_CONNECTION=sqlite
-DB_DATABASE=${ROOT}/database/database.sqlite
+DB_DATABASE=${DB_FILE}
 INSTALLED_AT=$(date '+%Y-%m-%d %H:%M:%S %Z')
 EOF
 chmod 600 "$ROOT/.Pteroless-installed"
@@ -426,7 +594,7 @@ printf "Username : %s\n" "$ADMIN_USERNAME"
 printf "Password : %s\n" "$ADMIN_PASSWORD"
 printf "Email: %s\n" "$ADMIN_EMAIL"
 else
-printf "Password : ${CYAN}(the password you entered)${RESET}\n"
+printf "Password : ${CYAN}(configured during setup)${RESET}\n"
 fi
 printf "\n"
 printf "Start with:\n"
