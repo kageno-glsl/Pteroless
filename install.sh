@@ -33,6 +33,9 @@ ADMIN_EMAIL="admin@example.com"
 ADMIN_FIRST_NAME="Admin"
 ADMIN_LAST_NAME="User"
 APP_URL="http://127.0.0.1:8080"
+RECAPTCHA_ENABLED=false
+RECAPTCHA_SECRET_KEY=""
+RECAPTCHA_WEBSITE_KEY=""
 PHPV=""
 for arg in "$@"; do
 case "$arg" in
@@ -40,7 +43,7 @@ case "$arg" in
 AUTOMATIC_SETUP=true
 ;;
 -h|--help)
-cat <<EOF
+cat <<EOF2
 Pteroless Installer
 Usage:
 sudo ./install.sh
@@ -54,6 +57,9 @@ Opens the setup form and asks for:
 - First name
 - Last name
 - App URL
+- reCAPTCHA on/off
+- reCAPTCHA website key
+- reCAPTCHA secret key
 Automatic
 Uses these defaults:
 Username : admin
@@ -61,7 +67,8 @@ Password : admin123
 Email: admin@example.com
 Name : Admin User
 App URL: http://127.0.0.1:8080
-EOF
+reCAPTCHA: OFF
+EOF2
 exit 0
 ;;
 *)
@@ -81,16 +88,26 @@ if ! command -v apt-get >/dev/null 2>&1; then
 fail "apt-get was not found. This installer supports Debian/Ubuntu systems."
 fi
 if [[ "$AUTOMATIC_SETUP" == true ]]; then
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+export npm_config_yes=true
+export CI=true
+export GIT_TERMINAL_PROMPT=0
+fi
+if [[ "$AUTOMATIC_SETUP" == true ]]; then
 ADMIN_PASSWORD="admin123"
+RECAPTCHA_ENABLED=false
+RECAPTCHA_SECRET_KEY=""
+RECAPTCHA_WEBSITE_KEY=""
 printf "${WHITE}Automatic setup enabled.${RESET}\n"
 printf "\n"
 printf "Username : ${CYAN}%s${RESET}\n" "$ADMIN_USERNAME"
 printf "Password : ${CYAN}%s${RESET}\n" "$ADMIN_PASSWORD"
 printf "Email: ${CYAN}%s${RESET}\n" "$ADMIN_EMAIL"
-printf "Name : ${CYAN}%s %s${RESET}\n" \
-"$ADMIN_FIRST_NAME" \
-"$ADMIN_LAST_NAME"
+printf "Name : ${CYAN}%s %s${RESET}\n" "$ADMIN_FIRST_NAME" "$ADMIN_LAST_NAME"
 printf "App URL: ${CYAN}%s${RESET}\n" "$APP_URL"
+printf "reCAPTCHA: ${CYAN}OFF${RESET}\n"
 printf "\n"
 else
 printf "${WHITE}Pteroless Setup${RESET}\n"
@@ -113,6 +130,39 @@ ADMIN_LAST_NAME="${INPUT_LAST:-User}"
 read -r -p "App URL [http://127.0.0.1:8080]: " INPUT_URL
 APP_URL="${INPUT_URL:-http://127.0.0.1:8080}"
 printf "\n"
+printf "${WHITE}reCAPTCHA Setup${RESET}\n"
+while true; do
+read -r -p "Enable reCAPTCHA? [y/N]: " INPUT_RECAPTCHA
+INPUT_RECAPTCHA="${INPUT_RECAPTCHA:-N}"
+case "$INPUT_RECAPTCHA" in
+[Yy])
+RECAPTCHA_ENABLED=true
+read -r -p "reCAPTCHA Website Key: " RECAPTCHA_WEBSITE_KEY
+read -r -s -p "reCAPTCHA Secret Key: " RECAPTCHA_SECRET_KEY
+printf '%s\n' ""
+if [[ -z "$RECAPTCHA_WEBSITE_KEY" || -z "$RECAPTCHA_SECRET_KEY" ]]; then
+warn "Website Key and Secret Key are required when reCAPTCHA is enabled."
+RECAPTCHA_ENABLED=false
+RECAPTCHA_WEBSITE_KEY=""
+RECAPTCHA_SECRET_KEY=""
+continue
+fi
+ok "reCAPTCHA enabled."
+break
+;;
+[Nn])
+RECAPTCHA_ENABLED=false
+RECAPTCHA_SECRET_KEY=""
+RECAPTCHA_WEBSITE_KEY=""
+ok "reCAPTCHA disabled."
+break
+;;
+*)
+warn "Please enter Y or N."
+;;
+esac
+done
+printf "\n"
 printf "${WHITE}Setup summary${RESET}\n"
 printf '%s\n' '----------------------------------------'
 printf "Username : %s\n" "$ADMIN_USERNAME"
@@ -120,6 +170,7 @@ printf "Password : ********\n"
 printf "Email: %s\n" "$ADMIN_EMAIL"
 printf "Name : %s %s\n" "$ADMIN_FIRST_NAME" "$ADMIN_LAST_NAME"
 printf "App URL: %s\n" "$APP_URL"
+printf "reCAPTCHA: %s\n" "$([[ "$RECAPTCHA_ENABLED" == true ]] && printf 'enabled' || printf 'disabled')"
 printf '%s\n' '----------------------------------------'
 read -r -p "Continue installation? [Y/n]: " CONFIRM
 CONFIRM="${CONFIRM:-Y}"
@@ -146,9 +197,6 @@ golang-go \
 sqlite3
 ok "System dependencies installed."
 step "Checking PHP"
-# Use distribution-provided PHP meta-packages instead of hard-coding
-# php8.x-* package names. This also handles environments that ship a
-# separate/custom PHP build under /usr/local/php.
 PHP_PACKAGES=(
 php
 php-cli
@@ -164,13 +212,8 @@ php-gd
 php-intl
 php-opcache
 )
-
 info "Installing/refreshing the Debian/Ubuntu PHP package set."
 apt-get install -y "${PHP_PACKAGES[@]}"
-
-# Some dev containers put a custom PHP before /usr/bin in PATH. Prefer the
-# package-managed PHP because its extensions are installed by apt and match
-# the system ABI.
 SYSTEM_PHP=""
 if [[ -x "/usr/bin/php" ]]; then
 SYSTEM_PHP="/usr/bin/php"
@@ -182,12 +225,9 @@ break
 fi
 done
 fi
-
 if [[ -n "$SYSTEM_PHP" ]]; then
-PHP_VERSION="$("$SYSTEM_PHP" -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)"
+PHP_VERSION="$($SYSTEM_PHP -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)"
 if [[ "$PHP_VERSION" =~ ^8\.[2-9]$ ]]; then
-# Ensure commands such as composer (which use /usr/bin/env php) also resolve
-# to the system PHP instead of /usr/local/php.
 export PATH="/usr/bin:/bin:${PATH}"
 hash -r 2>/dev/null || true
 ok "Using system PHP ${PHP_VERSION} (${SYSTEM_PHP})"
@@ -197,12 +237,8 @@ fi
 else
 fail "Could not locate a package-managed PHP binary in /usr/bin."
 fi
-
-# Install all required extensions for the same package-managed PHP.
 step "Installing PHP extensions"
 apt-get install -y "${PHP_PACKAGES[@]}"
-
-# Verify the exact extensions Composer will check.
 REQUIRED_EXTENSIONS=(zip pdo_mysql sodium bcmath mbstring xml curl gd intl)
 MISSING_EXTENSIONS=()
 for ext in "${REQUIRED_EXTENSIONS[@]}"; do
@@ -210,16 +246,12 @@ if ! php -m 2>/dev/null | grep -Eiq "^${ext}$"; then
 MISSING_EXTENSIONS+=("$ext")
 fi
 done
-
-# OPcache is reported by `php -m` as "Zend OPcache", not "opcache".
 if ! php -m 2>/dev/null | grep -Eiq "^Zend OPcache$"; then
 MISSING_EXTENSIONS+=("opcache")
 fi
-
 if [[ "${#MISSING_EXTENSIONS[@]}" -gt 0 ]]; then
 fail "PHP ${PHP_VERSION} is missing extensions: ${MISSING_EXTENSIONS[*]}"
 fi
-
 PHP_VERSION="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)"
 PHPV="$PHP_VERSION"
 ok "PHP ${PHPV} and required extensions are ready."
@@ -289,9 +321,6 @@ step "Preparing SQLite"
 mkdir -p "$ROOT/database"
 DB_FILE="$ROOT/database/database.sqlite"
 USE_EXISTING_DB=false
-
-# If the installer has been run before and a database already exists, let
-# normal interactive installs choose whether to keep it or start fresh.
 if [[ -f "$DB_FILE" ]]; then
 if [[ "$AUTOMATIC_SETUP" == true ]]; then
 info "Automatic setup enabled: replacing the existing database with a fresh one."
@@ -303,7 +332,6 @@ printf "  %s\n" "$DB_FILE"
 printf "\n"
 read -r -p "Use existing database? [Y/n]: " USE_DB_CONFIRM
 USE_DB_CONFIRM="${USE_DB_CONFIRM:-Y}"
-
 if [[ "$USE_DB_CONFIRM" =~ ^[Yy]$ ]]; then
 USE_EXISTING_DB=true
 ok "Using existing database."
@@ -313,7 +341,6 @@ rm -f "$DB_FILE"
 fi
 fi
 fi
-
 if [[ "$USE_EXISTING_DB" != true ]]; then
 touch "$DB_FILE"
 chmod 664 "$DB_FILE"
@@ -328,32 +355,29 @@ cp "$ROOT/.env.example" "$ROOT/.env"
 ok ".env created from .env.example."
 else
 info ".env.example not found. Creating a default .env file."
-cat > "$ROOT/.env" <<EOF
+cat > "$ROOT/.env" <<EOF2
 APP_NAME=Pteroless
 APP_ENV=production
 APP_KEY=
 APP_DEBUG=false
 APP_URL=${APP_URL}
-
 LOG_CHANNEL=stack
 LOG_LEVEL=warning
-
 DB_CONNECTION=sqlite
 DB_DATABASE=${DB_FILE}
-
 BROADCAST_CONNECTION=log
 CACHE_STORE=file
 FILESYSTEM_DISK=local
 QUEUE_CONNECTION=sync
 SESSION_DRIVER=file
 SESSION_LIFETIME=120
-
 MAIL_MAILER=log
-
-# Pteroless / application defaults
 APP_ENVIRONMENT_ONLY=false
 CACHE_DRIVER=file
-EOF
+RECAPTCHA_ENABLED=${RECAPTCHA_ENABLED}
+RECAPTCHA_WEBSITE_KEY=
+RECAPTCHA_SECRET_KEY=
+EOF2
 ok ".env created with default settings."
 fi
 else
@@ -386,10 +410,16 @@ fi
 else
 set_env "MAIL_MAILER" "log"
 fi
+set_env "RECAPTCHA_ENABLED" "$RECAPTCHA_ENABLED"
+if [[ "$RECAPTCHA_ENABLED" == true ]]; then
+set_env "RECAPTCHA_WEBSITE_KEY" "$RECAPTCHA_WEBSITE_KEY"
+set_env "RECAPTCHA_SECRET_KEY" "$RECAPTCHA_SECRET_KEY"
+else
+set_env "RECAPTCHA_WEBSITE_KEY" ""
+set_env "RECAPTCHA_SECRET_KEY" ""
+fi
 ok "Environment configured."
 step "Generating application key"
-# Laravel's Composer scripts can invoke Artisan before vendor dependencies
-# finish installing, so APP_KEY must exist before `composer install`.
 CURRENT_APP_KEY="$(grep -E '^APP_KEY=' "$ROOT/.env" | head -n1 | cut -d'=' -f2- || true)"
 if [[ -n "$CURRENT_APP_KEY" && "$CURRENT_APP_KEY" != "null" ]]; then
 ok "Application key already exists."
@@ -401,10 +431,7 @@ fi
 set_env "APP_KEY" "$APP_KEY_VALUE"
 ok "Application key generated."
 fi
-
 step "Preparing Laravel storage"
-# Laravel may boot during Composer post-install scripts. The compiled view
-# path and framework cache directories must already exist at that point.
 mkdir -p \
 "$ROOT/storage/framework/cache/data" \
 "$ROOT/storage/framework/sessions" \
@@ -415,7 +442,6 @@ chmod -R 775 \
 "$ROOT/storage" \
 "$ROOT/bootstrap/cache"
 ok "Laravel storage directories prepared."
-
 step "Installing PHP dependencies"
 composer install \
 --no-dev \
@@ -423,7 +449,6 @@ composer install \
 --no-interaction \
 --prefer-dist
 ok "PHP dependencies installed."
-
 step "Preparing Laravel"
 php artisan config:clear
 php artisan cache:clear || true
@@ -437,25 +462,21 @@ ok "Database migrations completed."
 step "Checking administrator account"
 if [[ "$USE_EXISTING_DB" == true ]]; then
 ADMIN_EXISTS="0"
-
 if sqlite3 "$DB_FILE" "SELECT name FROM sqlite_master WHERE type='table' AND name='users';" | grep -qx "users"; then
 ADMIN_EXISTS="$(sqlite3 "$DB_FILE" \
 "SELECT COUNT(*) FROM users WHERE CAST(root_admin AS TEXT) IN ('1','true');" \
 2>/dev/null || echo 0)"
 fi
-
 if [[ "$ADMIN_EXISTS" =~ ^[0-9]+$ ]] && [[ "$ADMIN_EXISTS" -gt 0 ]]; then
 ok "An administrator already exists in the existing database. Skipping account creation."
 else
 EMAIL_SQL="$(printf '%s' "$ADMIN_EMAIL" | sed "s/'/''/g")"
 USERNAME_SQL="$(printf '%s' "$ADMIN_USERNAME" | sed "s/'/''/g")"
-
 EMAIL_TAKEN="$(sqlite3 "$DB_FILE" \
 "SELECT COUNT(*) FROM users WHERE email = '${EMAIL_SQL}';" 2>/dev/null || echo 0)"
 USERNAME_TAKEN="$(sqlite3 "$DB_FILE" \
 "SELECT COUNT(*) FROM users WHERE username = '${USERNAME_SQL}';" 2>/dev/null || echo 0)"
-
-if [[ "$EMAIL_TAKEN" =~ ^[0-9]+$ ]] && [[ "$EMAIL_TAKEN" -gt 0 ]] ||
+if [[ "$EMAIL_TAKEN" =~ ^[0-9]+$ ]] && [[ "$EMAIL_TAKEN" -gt 0 ]] || \
    [[ "$USERNAME_TAKEN" =~ ^[0-9]+$ ]] && [[ "$USERNAME_TAKEN" -gt 0 ]]; then
 warn "Requested administrator username/email is already in use in the existing database."
 info "Skipping administrator creation to avoid changing the existing user."
@@ -484,39 +505,51 @@ php artisan p:user:make \
 --no-interaction
 ok "Administrator account created."
 fi
+step "Preparing Yarn"
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+if command -v corepack >/dev/null 2>&1; then
+corepack disable >/dev/null 2>&1 || true
+fi
+hash -r 2>/dev/null || true
+if ! command -v yarn >/dev/null 2>&1; then
+info "Yarn not found. Installing Yarn 1.22.22."
+npm install --global --no-audit --no-fund --yes yarn@1.22.22
+ok "Yarn installed."
+else
+ok "Yarn already available: $(yarn --version 2>/dev/null || true)"
+fi
+hash -r 2>/dev/null || true
+if ! command -v yarn >/dev/null 2>&1; then
+fail "Yarn is unavailable after installation."
+fi
+YARN_VERSION="$(yarn --version 2>/dev/null || true)"
+if [[ -z "$YARN_VERSION" ]]; then
+fail "Could not determine Yarn version."
+fi
+ok "Using Yarn ${YARN_VERSION}."
 step "Installing frontend dependencies"
-# Some Pteroless/Pterodactyl source revisions import Signals but omit the
-# dependency from package.json/yarn.lock. Add the compatible upstream package
-# before a frozen Yarn install when it is missing.
 if [[ -f "$ROOT/package.json" ]]; then
 if ! node -e 'const p=require("./package.json"); const d={...(p.dependencies||{}), ...(p.devDependencies||{})}; process.exit(d["@preact/signals-react"] ? 0 : 1);' 2>/dev/null; then
 info "Missing @preact/signals-react dependency. Adding compatible version."
 yarn add "@preact/signals-react@^1.2.1" --ignore-scripts --non-interactive
+after_add=true
 ok "@preact/signals-react dependency added."
 fi
 fi
-
 if [[ -f "$ROOT/yarn.lock" ]]; then
-if ! command -v yarn >/dev/null 2>&1; then
-info "Yarn not found. Installing Yarn."
-npm install --global yarn
-ok "Yarn installed."
-fi
 yarn install \
 --frozen-lockfile \
 --non-interactive
 ok "Frontend dependencies installed with Yarn."
 else
 if [[ -f "$ROOT/package-lock.json" ]]; then
-npm ci --no-audit --no-fund
+npm ci --no-audit --no-fund --yes
 else
-npm install --no-audit --no-fund
+npm install --no-audit --no-fund --yes
 fi
 ok "Frontend dependencies installed with npm."
 fi
 step "Building frontend"
-# The project's `yarn clean` script expects public/assets to exist.
-# Fresh checkouts may not contain this generated directory yet.
 mkdir -p "$ROOT/public/assets"
 ok "Frontend asset directory ready."
 if [[ -f "$ROOT/yarn.lock" ]]; then
@@ -541,26 +574,19 @@ mkdir -p \
 "$ROOT/storage/app" \
 "$ROOT/storage/app/servers" \
 "$ROOT/bootstrap/cache"
-
-# The installer itself runs as root via sudo, but `start.sh` is intended to
-# run as the normal Codespaces/dev user. Give that user ownership so Laravel
-# can write logs, cache, sessions, compiled views, and SQLite data.
 INSTALL_USER="${SUDO_USER:-${USER:-}}"
 if [[ -z "$INSTALL_USER" || "$INSTALL_USER" == "root" ]]; then
 INSTALL_USER="$(logname 2>/dev/null || true)"
 fi
-
 if [[ -z "$INSTALL_USER" || "$INSTALL_USER" == "root" ]]; then
 warn "Could not determine the non-root installer user. Leaving ownership unchanged."
 else
 INSTALL_GROUP="$(id -gn "$INSTALL_USER" 2>/dev/null || echo "$INSTALL_USER")"
-
 chown -R "${INSTALL_USER}:${INSTALL_GROUP}" \
 "$ROOT/storage" \
 "$ROOT/bootstrap/cache"
 chown "${INSTALL_USER}:${INSTALL_GROUP}" "$DB_FILE" 2>/dev/null || true
 chown "${INSTALL_USER}:${INSTALL_GROUP}" "$ROOT/.env" 2>/dev/null || true
-
 chmod -R u+rwX,g+rwX \
 "$ROOT/storage" \
 "$ROOT/bootstrap/cache"
@@ -569,13 +595,14 @@ chmod 640 "$ROOT/.env"
 ok "Writable permissions configured for ${INSTALL_USER}."
 fi
 step "Writing installation information"
-cat > "$ROOT/.Pteroless-installed" <<EOF
+cat > "$ROOT/.Pteroless-installed" <<EOF2
 Pteroless installation completed.
 APP_URL=${APP_URL}
 DB_CONNECTION=sqlite
 DB_DATABASE=${DB_FILE}
+RECAPTCHA_ENABLED=${RECAPTCHA_ENABLED}
 INSTALLED_AT=$(date '+%Y-%m-%d %H:%M:%S %Z')
-EOF
+EOF2
 chmod 600 "$ROOT/.Pteroless-installed"
 ok "Installation information saved."
 printf "\n"
@@ -595,6 +622,13 @@ printf "Password : %s\n" "$ADMIN_PASSWORD"
 printf "Email: %s\n" "$ADMIN_EMAIL"
 else
 printf "Password : ${CYAN}(configured during setup)${RESET}\n"
+fi
+printf "\n"
+printf "reCAPTCHA: "
+if [[ "$RECAPTCHA_ENABLED" == true ]]; then
+printf "${CYAN}enabled${RESET}\n"
+else
+printf "${CYAN}disabled${RESET}\n"
 fi
 printf "\n"
 printf "Start with:\n"
