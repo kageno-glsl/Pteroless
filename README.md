@@ -935,6 +935,7 @@ The installer supports:
 
 ``` text
 APP_URL
+TRUSTED_PROXIES
 ADMIN_EMAIL
 ADMIN_USERNAME
 ADMIN_PASSWORD
@@ -955,6 +956,11 @@ APP_ENV=production
 APP_DEBUG=false
 APP_ENVIRONMENT_ONLY=false
 ```
+
+When running in GitHub Codespaces, the installer defaults `TRUSTED_PROXIES` to
+`**` so Laravel can use forwarded host and protocol headers. An existing
+`TRUSTED_PROXIES` value is preserved. For other reverse-proxy deployments, set
+this variable to the proxy addresses you trust.
 
 The database is configured for SQLite.
 
