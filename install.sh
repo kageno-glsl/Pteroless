@@ -396,6 +396,9 @@ set_env "APP_ENV" "production"
 set_env "APP_DEBUG" "false"
 set_env "APP_ENVIRONMENT_ONLY" "false"
 set_env "APP_URL" "$APP_URL"
+if [[ "${CODESPACES:-false}" == "true" ]] && ! grep -qE '^TRUSTED_PROXIES=.+' "$ROOT/.env"; then
+set_env "TRUSTED_PROXIES" "${TRUSTED_PROXIES:-**}"
+fi
 set_env "DB_CONNECTION" "sqlite"
 set_env "DB_DATABASE" "$DB_FILE"
 set_env "CACHE_DRIVER" "file"
