@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,4 +44,4 @@ if [[ "${CODESPACES:-false}" == "true" ]]; then
 printf '[Pteroless] Codespaces detected. Port %s is available at http://localhost:%s\n' "$PORT" "$PORT"
 fi
 exec php artisan serve --host="$HOST" --port="$PORT"
-```
+
