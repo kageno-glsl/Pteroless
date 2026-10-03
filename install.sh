@@ -28,7 +28,7 @@ printf "\n${BLUE}==>${RESET} ${WHITE}%s${RESET}\n" "$1"
 trap 'printf "\n${RED}[FAIL]${RESET} Installation failed at line %s.\n" "$LINENO" >&2' ERR
 AUTOMATIC_SETUP=false
 ADMIN_USERNAME="admin"
-ADMIN_PASSWORD=""
+ADMIN_PASSWORD="admin123"
 ADMIN_EMAIL="admin@example.com"
 ADMIN_FIRST_NAME="Admin"
 ADMIN_LAST_NAME="User"
@@ -99,13 +99,9 @@ printf "\n"
 read -r -p "Admin username [admin]: " INPUT_USERNAME
 ADMIN_USERNAME="${INPUT_USERNAME:-admin}"
 while true; do
-read -r -s -p "Admin password: " INPUT_PASSWORD
-printf "\n"
-if [[ -z "$INPUT_PASSWORD" ]]; then
-warn "Password cannot be empty."
-continue
-fi
-ADMIN_PASSWORD="$INPUT_PASSWORD"
+read -r -s -p "Admin password [admin123]: " INPUT_PASSWORD
+printf '%s\n' ""
+ADMIN_PASSWORD="${INPUT_PASSWORD:-admin123}"
 break
 done
 read -r -p "Admin email [admin@example.com]: " INPUT_EMAIL
@@ -118,13 +114,13 @@ read -r -p "App URL [http://127.0.0.1:8080]: " INPUT_URL
 APP_URL="${INPUT_URL:-http://127.0.0.1:8080}"
 printf "\n"
 printf "${WHITE}Setup summary${RESET}\n"
-printf "----------------------------------------\n"
+printf '%s\n' '----------------------------------------'
 printf "Username : %s\n" "$ADMIN_USERNAME"
 printf "Password : ********\n"
 printf "Email: %s\n" "$ADMIN_EMAIL"
 printf "Name : %s %s\n" "$ADMIN_FIRST_NAME" "$ADMIN_LAST_NAME"
 printf "App URL: %s\n" "$APP_URL"
-printf "----------------------------------------\n"
+printf '%s\n' '----------------------------------------'
 read -r -p "Continue installation? [Y/n]: " CONFIRM
 CONFIRM="${CONFIRM:-Y}"
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
